@@ -7,3 +7,5 @@ v86
 [UWP]
 
 Xbox-Linux
+
+Build test
