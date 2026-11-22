@@ -1,4 +1,6 @@
+
 name: Build UWP Package
+
 on:
   push:
     branches:
@@ -12,44 +14,87 @@ jobs:
     runs-on: windows-2022
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up MSBuild
-      uses: microsoft/setup-msbuild@v2
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
 
-    - name: Set up NuGet
-      uses: NuGet/setup-nuget@v2
+      - name: Set up NuGet
+        uses: NuGet/setup-nuget@v2
 
-    - name: Extract version string from AppxManifest
-      id: extract_version
-      run: |
-        $manifest = [xml](Get-Content uwp\XboxLinux\Package.appxmanifest)
-        $version = $manifest.Package.Identity.Version
-        echo $version
-        echo version=$version >> $env:GITHUB_OUTPUT
-        
-    - name: Echo the GitHub Env for File Names
-      run: |
-       echo "${{ steps.extract_version.outputs.version }}"
-    - name: Restore NuGet packages
-      run: nuget restore uwp\XboxLinux\XboxLinux.sln
+      - name: Generate new signing certificate
+        id: certificate
+        shell: pwsh
+        run: |
+          $password = ConvertTo-SecureString "BuildOnly-2026!" -AsPlainText -Force
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject "CN=lllsondowlll" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Xbox Linux Build Certificate" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -NotAfter (Get-Date).AddYears(5) `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3")
 
-    - name: Build the project
-      run: msbuild uwp\XboxLinux\XboxLinux.sln /t:Restore,Rebuild /p:Configuration=Release /p:Platform=x64
-  
-    - name: Build MSIX
-      run: |
-          & 'C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64/makeappx.exe' encrypt /p uwp\XboxLinux\AppPackages\XboxLinux_${{ steps.extract_version.outputs.version }}_Test\XboxLinux_${{ steps.extract_version.outputs.version }}_x64.msixbundle /ep "xboxlinux_${{ steps.extract_version.outputs.version }}.emsixbundle" /kt
-   
-    - name: Upload unencrypted MSIX
-      uses: actions/upload-artifact@v4
-      with:
-        name: unencrypted-msix
-        path: "uwp\\XboxLinux\\AppPackages\\XboxLinux_${{ steps.extract_version.outputs.version }}_Test\\XboxLinux_${{ steps.extract_version.outputs.version }}_x64.msixbundle"
+          $pfx = "$env:RUNNER_TEMP\XboxLinux_TemporaryKey.pfx"
+          $cer = "$env:RUNNER_TEMP\XboxLinux_TemporaryKey.cer"
 
-    - name: Upload encrypted EMSIXBundle
-      uses: actions/upload-artifact@v4
-      with:
-        name: encrypted-emsixbundle
-        path: "xboxlinux_${{ steps.extract_version.outputs.version }}.emsixbundle"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password
+          Export-Certificate -Cert $cert -FilePath $cer
+
+          echo "pfx=$pfx" >> $env:GITHUB_OUTPUT
+          echo "cer=$cer" >> $env:GITHUB_OUTPUT
+          echo "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: Extract version string from AppxManifest
+        id: extract_version
+        shell: pwsh
+        run: |
+          $manifest = [xml](Get-Content uwp\XboxLinux\Package.appxmanifest)
+          $version = $manifest.Package.Identity.Version
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Restore NuGet packages
+        run: nuget restore uwp\XboxLinux\XboxLinux.sln
+
+      - name: Build the project
+        shell: pwsh
+        run: |
+          msbuild uwp\XboxLinux\XboxLinux.sln `
+            /t:Restore,Rebuild `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:AppxPackageSigningEnabled=true `
+            /p:PackageCertificateKeyFile="${{ steps.certificate.outputs.pfx }}" `
+            /p:PackageCertificatePassword="BuildOnly-2026!" `
+            /p:PackageCertificateThumbprint="${{ steps.certificate.outputs.thumbprint }}"
+
+      - name: Build MSIX
+        shell: pwsh
+        run: |
+          $version = "${{ steps.extract_version.outputs.version }}"
+          $bundle = "uwp\XboxLinux\AppPackages\XboxLinux_${version}_Test\XboxLinux_${version}_x64.msixbundle"
+
+          & "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64/makeappx.exe" encrypt `
+            /p $bundle `
+            /ep "xboxlinux_${version}.emsixbundle" `
+            /kt
+
+      - name: Upload unencrypted MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: unencrypted-msix
+          path: "uwp\\XboxLinux\\AppPackages\\XboxLinux_${{ steps.extract_version.outputs.version }}_Test\\XboxLinux_${{ steps.extract_version.outputs.version }}_x64.msixbundle"
+
+      - name: Upload encrypted EMSIXBundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-emsixbundle
+          path: "xboxlinux_${{ steps.extract_version.outputs.version }}.emsixbundle"
+
+      - name: Upload public signing certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: signing-certificate
+          path: "${{ steps.certificate.outputs.cer }}"
